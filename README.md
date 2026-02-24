@@ -7,6 +7,7 @@ Chat with a live [Claude Code](https://claude.ai/claude-code) session from your 
 - Bridges Telegram to a real Claude Code CLI session running on your Mac
 - Persistent conversation — Claude remembers context across messages
 - Full Claude Code capabilities: file access, bash, everything
+- **Autonomous mode** — send a task with `/go`, go to sleep, Claude works overnight and pings you on Telegram when done
 - Only you can use it (locked to your Telegram user ID)
 - Runs as a background service — auto-starts on login, restarts if it crashes
 
@@ -125,10 +126,29 @@ launchctl load ~/Library/LaunchAgents/com.claudebot.plist
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Show bot status and current session ID |
+| `/start` | Show bot status |
 | `/reset` | Start a fresh conversation (clears context) |
 | `/compact` | Compress conversation history to free up context |
+| `/go <task>` | Run an autonomous task in the background (max 20 turns) |
+| `/go <N> <task>` | Same with a custom turn limit (e.g. `/go 50 build a dashboard`) |
+| `/stop` | Cancel the currently running `/go` task |
 | Any message | Sent directly to Claude |
+
+## Autonomous mode (`/go`)
+
+Send Claude a task, go to sleep, and wake up to results in Telegram.
+
+```
+/go Audit all my Python scripts in ~/scripts and write a summary report to ~/audit.md
+```
+
+Claude runs with full tool access — bash, file read/write, subagents — and sends you Telegram updates at meaningful milestones. When it's done, it pings you with a summary.
+
+**Safeguards:**
+- Default 20-turn cap (override with `/go 50 task`)
+- 2-hour hard timeout — Claude is killed and you're notified
+- One task at a time — use `/stop` to cancel before starting another
+- Telegram notification if turn limit, timeout, or error occurs
 
 ## How it works
 
