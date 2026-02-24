@@ -28,7 +28,7 @@ bot.use((ctx, next) => {
 });
 
 bot.command('start', (ctx) => {
-  ctx.reply(`Claude Code bot is live.\n\nCommands:\n/reset — fresh context\n/compact — compress history\n\nSession: ${sessionId || 'none'}`);
+  ctx.reply(`Claude Code bot is live.\n\nCommands:\n/reset — fresh context\n/compact — compress history\n\nStatus: ${sessionId ? 'active session' : 'no session yet'}`);
 });
 
 bot.command('reset', async (ctx) => {
@@ -93,7 +93,7 @@ async function sendToClaude(ctx, prompt) {
     clearTimeout(timeoutHandle);
     isBusy = false;
     const raw = Buffer.concat(chunks).toString().trim();
-    console.log('[bot] exit:', code, 'raw:', raw.slice(0, 300));
+    console.log('[bot] exit:', code, 'output length:', raw.length);
 
     try {
       const parsed = JSON.parse(raw);
