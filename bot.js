@@ -76,7 +76,7 @@ async function sendToClaude(ctx, prompt) {
   const spawnEnv = { ...process.env };
   delete spawnEnv.CLAUDECODE;
 
-  const proc = spawn(CLAUDE_BIN, args, { cwd: CWD, env: spawnEnv });
+  const proc = spawn(CLAUDE_BIN, args, { cwd: CWD, env: spawnEnv, stdio: ['ignore', 'pipe', 'pipe'] });
 
   const timeoutHandle = setTimeout(() => {
     console.error('[bot] timeout — killing claude');
