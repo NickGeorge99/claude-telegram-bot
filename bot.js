@@ -113,7 +113,11 @@ async function sendToClaude(ctx, prompt) {
     '--dangerously-skip-permissions',
   ];
 
-  proc = spawn(CLAUDE_BIN, args, { cwd: CWD });
+  // Strip CLAUDECODE so claude doesn't refuse to run inside another Claude session
+  const spawnEnv = { ...process.env };
+  delete spawnEnv.CLAUDECODE;
+
+  proc = spawn(CLAUDE_BIN, args, { cwd: CWD, env: spawnEnv });
 
   // Kill if Claude doesn't finish within timeout
   timeoutHandle = setTimeout(() => {
