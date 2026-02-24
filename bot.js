@@ -66,6 +66,7 @@ bot.command('compact', async (ctx) => {
 });
 
 bot.on('text', async (ctx) => {
+  if (ctx.message.text.startsWith('/')) return; // commands have their own handlers
   await sendToClaude(ctx, ctx.message.text);
 });
 
