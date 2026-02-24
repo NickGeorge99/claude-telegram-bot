@@ -13,7 +13,6 @@ const CLAUDE_BIN = resolve(process.env.HOME, '.local/bin/claude');
 const CWD = process.env.HOME;
 const SESSION_FILE = './session-id.txt';
 const RESPONSE_TIMEOUT_MS = 120_000; // 2 minutes max per response
-const THROTTLE_MS = 1200;
 
 if (!BOT_TOKEN) throw new Error('Missing TELEGRAM_BOT_TOKEN in .env');
 if (!ALLOWED_USER_ID) throw new Error('Missing TELEGRAM_ALLOWED_USER_ID in .env');
@@ -87,8 +86,6 @@ async function sendToClaude(ctx, prompt) {
     return;
   }
 
-  let fullText = '';
-  let lastEditAt = 0;
   let proc = null;
   let timeoutHandle = null;
 
@@ -107,8 +104,7 @@ async function sendToClaude(ctx, prompt) {
 
   const args = [
     '-p', prompt,
-    '--output-format', 'stream-json',
-    '--include-partial-messages',
+    '--output-format', 'json',
     '--session-id', sessionId,
     '--dangerously-skip-permissions',
   ];
@@ -127,41 +123,11 @@ async function sendToClaude(ctx, prompt) {
     isBusy = false;
   }, RESPONSE_TIMEOUT_MS);
 
-  let stdoutBuffer = '';
+  const stdoutChunks = [];
 
   proc.stdout.on('data', (chunk) => {
-    stdoutBuffer += chunk.toString();
-    const lines = stdoutBuffer.split('\n');
-    stdoutBuffer = lines.pop();
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const event = JSON.parse(line);
-        handleStreamEvent(event);
-      } catch {
-        // ignore non-JSON lines
-      }
-    }
+    stdoutChunks.push(chunk);
   });
-
-  function handleStreamEvent(event) {
-    if (event.type === 'assistant' && event.message?.content) {
-      const text = event.message.content
-        .filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join('');
-
-      if (text && text !== fullText) {
-        fullText = text;
-        const now = Date.now();
-        if (now - lastEditAt > THROTTLE_MS) {
-          lastEditAt = now;
-          editMessage(fullText);
-        }
-      }
-    }
-  }
 
   proc.stderr.on('data', (data) => {
     console.error('[claude stderr]', data.toString().trim());
@@ -171,11 +137,16 @@ async function sendToClaude(ctx, prompt) {
     clearTimeout(timeoutHandle);
     isBusy = false;
     console.log(`[claude] exited with code ${code}`);
-    const finalText = fullText || '(no response)';
-    if (!fullText) {
-      console.error('[bot] Claude produced no output. Exit code:', code);
+
+    const raw = Buffer.concat(stdoutChunks).toString().trim();
+    try {
+      const parsed = JSON.parse(raw);
+      const result = parsed.result || '(no response)';
+      await editMessage(result);
+    } catch {
+      console.error('[bot] Failed to parse JSON response:', raw.slice(0, 200));
+      await editMessage('(error reading response)');
     }
-    await editMessage(finalText);
   });
 }
 
