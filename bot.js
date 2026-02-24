@@ -95,7 +95,7 @@ bot.command('go', async (ctx) => {
   goTimeoutHandle = setTimeout(async () => {
     if (goProc) {
       console.error('[go] 2-hour timeout — killing');
-      goProc.kill();
+      try { goProc.kill(); } catch (e) { console.error('[go] kill failed:', e.message); }
       goProc = null;
       goTimeoutHandle = null;
       await bot.telegram.sendMessage(ctx.chat.id, 'Task timed out after 2 hours and was stopped.');
@@ -114,21 +114,22 @@ bot.command('go', async (ctx) => {
 
     if (!hadProc) return; // was killed by /stop, already notified
 
-    const rawOutput = Buffer.concat(chunks).toString().trim();
-    console.log('[go] exit code:', code, 'output length:', rawOutput.length);
-
-    if (code !== 0) {
-      await bot.telegram.sendMessage(ctx.chat.id, `Task ended with an error (exit ${code}). Check ~/Projects/claude-telegram-bot/bot.log.`);
-      return;
-    }
-
     try {
+      const rawOutput = Buffer.concat(chunks).toString().trim();
+      console.log('[go] exit code:', code, 'output length:', rawOutput.length);
+
+      if (code !== 0) {
+        await bot.telegram.sendMessage(ctx.chat.id, `Task ended with an error (exit ${code}). Check ~/Projects/claude-telegram-bot/bot.log.`);
+        return;
+      }
+
       const parsed = JSON.parse(rawOutput);
       if (parsed.result && /turn limit|max.?turns|maximum turns/i.test(parsed.result)) {
         await bot.telegram.sendMessage(ctx.chat.id, `Hit the ${maxTurns}-turn limit. Use /go to continue if needed.`);
       }
-    } catch {
-      console.error('[go] bad JSON:', rawOutput.slice(0, 200));
+    } catch (e) {
+      console.error('[go] close handler error:', e.message);
+      bot.telegram.sendMessage(ctx.chat.id, 'Internal error finishing task.').catch(() => {});
     }
   });
 });
@@ -140,7 +141,7 @@ bot.command('stop', async (ctx) => {
   }
   clearTimeout(goTimeoutHandle);
   goTimeoutHandle = null;
-  goProc.kill();
+  try { goProc.kill(); } catch (e) { console.error('[stop] kill failed:', e.message); }
   goProc = null;
   await ctx.reply('Task stopped.');
 });
