@@ -12,11 +12,12 @@ const ALLOWED_USER_ID = parseInt(process.env.TELEGRAM_ALLOWED_USER_ID, 10);
 const CLAUDE_BIN = resolve(process.env.HOME, '.local/bin/claude');
 const CWD = process.env.HOME;
 const SESSION_FILE = './session-id.txt';
+const RESPONSE_TIMEOUT_MS = 120_000; // 2 minutes max per response
+const THROTTLE_MS = 1200;
 
 if (!BOT_TOKEN) throw new Error('Missing TELEGRAM_BOT_TOKEN in .env');
 if (!ALLOWED_USER_ID) throw new Error('Missing TELEGRAM_ALLOWED_USER_ID in .env');
 
-// Persist session ID across restarts
 function loadSessionId() {
   if (existsSync(SESSION_FILE)) {
     return readFileSync(SESSION_FILE, 'utf8').trim();
@@ -31,6 +32,7 @@ function saveSessionId(id) {
 }
 
 let sessionId = loadSessionId();
+let isBusy = false; // concurrency lock — one Claude response at a time
 
 const bot = new Telegraf(BOT_TOKEN);
 
@@ -50,6 +52,10 @@ bot.command('start', (ctx) => {
 });
 
 bot.command('reset', async (ctx) => {
+  if (isBusy) {
+    await ctx.reply('Claude is still responding. Please wait...');
+    return;
+  }
   sessionId = randomUUID();
   saveSessionId(sessionId);
   await ctx.reply('Session reset. Fresh context started.');
@@ -64,12 +70,39 @@ bot.on('text', async (ctx) => {
 });
 
 async function sendToClaude(ctx, prompt) {
-  // Send placeholder immediately so user knows we received it
-  const sentMsg = await ctx.reply('...');
+  if (isBusy) {
+    await ctx.reply('Claude is still responding, please wait...');
+    return;
+  }
+
+  isBusy = true;
+  let sentMsg;
+
+  try {
+    sentMsg = await ctx.reply('...');
+  } catch (e) {
+    console.error('[bot] Failed to send placeholder:', e.message);
+    isBusy = false;
+    return;
+  }
 
   let fullText = '';
   let lastEditAt = 0;
-  const THROTTLE_MS = 1200; // edit at most once per 1.2s to stay under Telegram rate limits
+  let proc = null;
+  let timeoutHandle = null;
+
+  async function editMessage(text) {
+    const safe = text.length > 4000
+      ? text.slice(0, 4000) + '\n\n[truncated — response exceeded 4000 chars]'
+      : text;
+    await bot.telegram
+      .editMessageText(ctx.chat.id, sentMsg.message_id, undefined, safe)
+      .catch((e) => {
+        if (e.description !== 'Bad Request: message is not modified') {
+          console.error('[edit error]', e.description);
+        }
+      });
+  }
 
   const args = [
     '-p', prompt,
@@ -79,14 +112,22 @@ async function sendToClaude(ctx, prompt) {
     '--dangerously-skip-permissions',
   ];
 
-  const proc = spawn(CLAUDE_BIN, args, { cwd: CWD });
+  proc = spawn(CLAUDE_BIN, args, { cwd: CWD });
+
+  // Kill if Claude doesn't finish within timeout
+  timeoutHandle = setTimeout(() => {
+    console.error('[bot] Claude response timed out, killing process');
+    proc.kill();
+    editMessage('(response timed out after 2 minutes)').catch(() => {});
+    isBusy = false;
+  }, RESPONSE_TIMEOUT_MS);
 
   let stdoutBuffer = '';
 
   proc.stdout.on('data', (chunk) => {
     stdoutBuffer += chunk.toString();
     const lines = stdoutBuffer.split('\n');
-    stdoutBuffer = lines.pop(); // hold back incomplete line
+    stdoutBuffer = lines.pop();
 
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -94,14 +135,13 @@ async function sendToClaude(ctx, prompt) {
         const event = JSON.parse(line);
         handleStreamEvent(event);
       } catch {
-        // ignore non-JSON lines (e.g. debug output)
+        // ignore non-JSON lines
       }
     }
   });
 
   function handleStreamEvent(event) {
     if (event.type === 'assistant' && event.message?.content) {
-      // Concatenate all text blocks in this message
       const text = event.message.content
         .filter((b) => b.type === 'text')
         .map((b) => b.text)
@@ -112,30 +152,26 @@ async function sendToClaude(ctx, prompt) {
         const now = Date.now();
         if (now - lastEditAt > THROTTLE_MS) {
           lastEditAt = now;
-          editMessage(fullText).catch(() => {});
+          editMessage(fullText);
         }
       }
     }
   }
 
   proc.stderr.on('data', (data) => {
-    console.error('[claude stderr]', data.toString());
+    console.error('[claude stderr]', data.toString().trim());
   });
 
   proc.on('close', async (code) => {
+    clearTimeout(timeoutHandle);
+    isBusy = false;
     console.log(`[claude] exited with code ${code}`);
     const finalText = fullText || '(no response)';
-    // Always do a final edit to show complete response
-    await editMessage(finalText).catch(() => {});
+    if (!fullText) {
+      console.error('[bot] Claude produced no output. Exit code:', code);
+    }
+    await editMessage(finalText);
   });
-
-  async function editMessage(text) {
-    // Telegram message limit is 4096 chars — truncate with notice if needed
-    const safe = text.length > 4000
-      ? text.slice(0, 4000) + '\n\n[truncated — response exceeded 4000 chars]'
-      : text;
-    await bot.telegram.editMessageText(ctx.chat.id, sentMsg.message_id, undefined, safe);
-  }
 }
 
 bot.launch();
