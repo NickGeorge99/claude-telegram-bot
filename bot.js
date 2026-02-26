@@ -11,7 +11,7 @@ const ALLOWED_USER_ID = parseInt(process.env.TELEGRAM_ALLOWED_USER_ID, 10);
 const CLAUDE_BIN = resolve(process.env.HOME, '.local/bin/claude');
 const CWD = process.env.HOME;
 const SESSION_FILE = './session-id.txt';
-const RESPONSE_TIMEOUT_MS = 120_000;
+const RESPONSE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min safety net (Claude Code has no timeout)
 const GO_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours
 const SCRIPTS_DIR = resolve(process.env.HOME, 'scripts');
 const GO_SYSTEM_PROMPT = `You are running as an autonomous Claude Code agent. You have full tool access including bash, file read/write, and subagents. You also have access to a telegram-notify command in your PATH — use it to send progress updates to the user at meaningful milestones (not every step). Example: telegram-notify "Finished scaffolding the dashboard". When you finish your task, use telegram-notify to send a brief summary of what you did. If you are about to hit your turn limit and cannot finish, use telegram-notify to tell the user where you left off.`;
@@ -146,6 +146,28 @@ bot.command('stop', async (ctx) => {
   await ctx.reply('Task stopped.');
 });
 
+bot.on('photo', async (ctx) => {
+  const photo = ctx.message.photo[ctx.message.photo.length - 1]; // highest res
+  const caption = ctx.message.caption || '';
+
+  try {
+    const fileLink = await ctx.telegram.getFileLink(photo.file_id);
+    const tmpPath = `/tmp/tg_${photo.file_unique_id}.jpg`;
+
+    const res = await fetch(fileLink.href);
+    writeFileSync(tmpPath, Buffer.from(await res.arrayBuffer()));
+
+    const prompt = caption
+      ? `The user sent an image. Read the file at ${tmpPath} to see it.\n\n${caption}`
+      : `The user sent an image. Read the file at ${tmpPath} and describe what you see.`;
+
+    await sendToClaude(ctx, prompt);
+  } catch (e) {
+    console.error('[bot] photo error:', e.message);
+    await ctx.reply('Failed to process image.');
+  }
+});
+
 bot.on('text', async (ctx) => {
   if (ctx.message.text.startsWith('/')) return;
   await sendToClaude(ctx, ctx.message.text);
@@ -182,10 +204,12 @@ async function sendToClaude(ctx, prompt) {
 
   const proc = spawn(CLAUDE_BIN, args, { cwd: CWD, env: spawnEnv, stdio: ['ignore', 'pipe', 'pipe'] });
 
+  let timedOut = false;
   const timeoutHandle = setTimeout(() => {
     console.error('[bot] timeout — killing claude');
+    timedOut = true;
     proc.kill();
-    editMessage('(timed out after 2 minutes)').catch(() => {});
+    editMessage('(timed out after 30 minutes)').catch(() => {});
     isBusy = false;
   }, RESPONSE_TIMEOUT_MS);
 
@@ -195,13 +219,25 @@ async function sendToClaude(ctx, prompt) {
 
   proc.on('close', async (code) => {
     clearTimeout(timeoutHandle);
+    if (timedOut) return; // timeout handler already responded
     isBusy = false;
     const raw = Buffer.concat(chunks).toString().trim();
     console.log('[bot] exit:', code, 'output length:', raw.length);
 
+    if (!raw) {
+      await editMessage('(empty response from Claude)');
+      return;
+    }
+
     try {
-      const parsed = JSON.parse(raw);
-      // Save real session ID for next message
+      // Handle potential multiple JSON objects (take the last complete one)
+      const lines = raw.split('\n');
+      let parsed;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try { parsed = JSON.parse(lines.slice(i).join('\n')); break; } catch { /* try next */ }
+      }
+      if (!parsed) parsed = JSON.parse(raw);
+
       if (parsed.session_id) {
         sessionId = parsed.session_id;
         writeFileSync(SESSION_FILE, sessionId);
@@ -209,7 +245,7 @@ async function sendToClaude(ctx, prompt) {
       }
       await editMessage(parsed.result || '(no response)');
     } catch {
-      console.error('[bot] bad JSON:', raw.slice(0, 200));
+      console.error('[bot] bad JSON:', raw.slice(0, 500));
       await editMessage('(error reading response)');
     }
   });
